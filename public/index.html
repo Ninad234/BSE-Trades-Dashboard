@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BSE Trades Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    @keyframes flash { from { background-color: rgba(56, 189, 248, 0.35); } to { background-color: transparent; } }
+    .flash { animation: flash 1.2s ease-out; }
+    .grid-wrap { max-height: 520px; overflow: auto; }
+    .grid-wrap thead th { position: sticky; top: 0; background: #0f172a; z-index: 1; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-200 min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+    <header class="flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-semibold text-white">BSE Trades Dashboard</h1>
+        <p class="text-sm text-slate-400">Live stream over WebSocket. No polling, no page refresh.</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <span id="conn-badge" class="px-3 py-1 rounded-full text-xs font-medium bg-slate-700 text-slate-300">Connecting...</span>
+        <button id="btn-start" class="px-4 py-2 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium">Start BSE Pull</button>
+        <button id="btn-cancel" class="px-4 py-2 rounded-md bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium" disabled>Cancel Pull</button>
+        <button id="btn-clear" class="px-4 py-2 rounded-md bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium">Clear Trades</button>
+      </div>
+    </header>
+
+    <section class="rounded-lg border border-slate-800 bg-slate-900 p-4 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Pull Progress</h2>
+        <span id="job-status" class="text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300">idle</span>
+      </div>
+      <div class="w-full h-3 rounded bg-slate-800 overflow-hidden">
+        <div id="progress-bar" class="h-3 bg-sky-500 transition-all duration-500" style="width: 0%"></div>
+      </div>
+      <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-300">
+        <span>Trades: <span id="prog-trades" class="mono">0 / 0</span></span>
+        <span>Chunks: <span id="prog-chunks" class="mono">0 / 0</span></span>
+        <span>ETA: <span id="prog-eta" class="mono">-</span></span>
+        <span>Job: <span id="prog-job" class="mono text-slate-400">-</span></span>
+      </div>
+      <div id="ack-box" class="hidden text-xs mono rounded bg-slate-950 border border-slate-800 p-2 text-emerald-300"></div>
+      <div id="error-box" class="hidden text-xs rounded bg-red-950 border border-red-900 p-2 text-red-300"></div>
+    </section>
+
+    <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Total Trades</div>
+        <div id="stat-trades" class="mt-1 text-2xl font-semibold text-white mono">0</div>
+      </div>
+      <div class="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Total Volume</div>
+        <div id="stat-volume" class="mt-1 text-2xl font-semibold text-white mono">0</div>
+      </div>
+      <div class="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Turnover (INR)</div>
+        <div id="stat-turnover" class="mt-1 text-2xl font-semibold text-white mono">0</div>
+      </div>
+      <div class="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-400">Buy / Sell</div>
+        <div id="stat-sides" class="mt-1 text-2xl font-semibold text-white mono">0 / 0</div>
+      </div>
+    </section>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <section class="rounded-lg border border-slate-800 bg-slate-900 p-4 lg:col-span-1">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400 mb-3">Turnover by Symbol</h2>
+        <div id="symbol-bars" class="space-y-3 text-sm"></div>
+        <p id="symbol-empty" class="text-sm text-slate-500">No trades yet.</p>
+      </section>
+
+      <section class="rounded-lg border border-slate-800 bg-slate-900 p-4 lg:col-span-2">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400">Live Trades</h2>
+          <span class="text-xs text-slate-500">Latest <span id="grid-max">200</span> rows, newest first</span>
+        </div>
+        <div class="grid-wrap rounded border border-slate-800">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs uppercase tracking-wide text-slate-400">
+                <th class="px-3 py-2">#</th>
+                <th class="px-3 py-2">Time</th>
+                <th class="px-3 py-2">Scrip</th>
+                <th class="px-3 py-2">Symbol</th>
+                <th class="px-3 py-2">Side</th>
+                <th class="px-3 py-2 text-right">Price</th>
+                <th class="px-3 py-2 text-right">Qty</th>
+                <th class="px-3 py-2 text-right">Value</th>
+              </tr>
+            </thead>
+            <tbody id="trade-rows" class="mono"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      var MAX_ROWS = 200;
+      var state = { trades: [], stats: null, job: null, newCount: 0, connected: false, cancelling: false };
+      var renderQueued = false;
+      var socket = null;
+      var retryDelay = 1000;
+
+      var nfInt = new Intl.NumberFormat('en-IN');
+      var nfMoney = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      var nfCompact = new Intl.NumberFormat('en-IN', { notation: 'compact', maximumFractionDigits: 2 });
+
+      function $(id) { return document.getElementById(id); }
+
+      function esc(value) {
+        return String(value).replace(/[&<>"']/g, function (c) {
+          return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+      }
+
+      function formatDuration(ms) {
+        var total = Math.max(0, Math.round(ms / 1000));
+        var m = Math.floor(total / 60);
+        var s = total % 60;
+        return m + 'm ' + String(s).padStart(2, '0') + 's';
+      }
+
+      // ---------------------------------------------------------------- WebSocket
+
+      function connect() {
+        var scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        socket = new WebSocket(scheme + '://' + location.host + '/ws');
+
+        socket.onopen = function () {
+          state.connected = true;
+          retryDelay = 1000;
+          scheduleRender();
+        };
+
+        socket.onmessage = function (event) {
+          var msg;
+          try { msg = JSON.parse(event.data); } catch (e) { return; }
+          handleMessage(msg);
+        };
+
+        socket.onclose = function () {
+          state.connected = false;
+          scheduleRender();
+          setTimeout(connect, retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 10000);
+        };
+
+        socket.onerror = function () {
+          socket.close();
+        };
+      }
+
+      function handleMessage(msg) {
+        switch (msg.type) {
+          case 'snapshot':
+            state.trades = msg.trades.slice().reverse().slice(0, MAX_ROWS);
+            state.stats = msg.stats;
+            state.job = msg.job;
+            state.newCount = 0;
+            break;
+          case 'trades':
+            state.trades = msg.trades.slice().reverse().concat(state.trades).slice(0, MAX_ROWS);
+            state.newCount += msg.trades.length;
+            state.stats = msg.stats;
+            state.job = msg.job;
+            break;
+          case 'job_started':
+            state.job = msg.job;
+            hide('error-box');
+            break;
+          case 'job_completed':
+          case 'job_cancelled':
+            state.job = msg.job;
+            state.stats = msg.stats;
+            state.cancelling = false;
+            break;
+          case 'job_failed':
+            state.job = msg.job;
+            state.stats = msg.stats;
+            state.cancelling = false;
+            show('error-box', 'Pull failed: ' + (msg.job.error || 'unknown error'));
+            break;
+          case 'cleared':
+            state.trades = [];
+            state.stats = msg.stats;
+            state.newCount = 0;
+            break;
+          default:
+            return;
+        }
+        scheduleRender();
+      }
+
+      // ---------------------------------------------------------------- Actions
+
+      function show(id, text) {
+        var el = $(id);
+        el.textContent = text;
+        el.classList.remove('hidden');
+      }
+
+      function hide(id) {
+        $(id).classList.add('hidden');
+      }
+
+      function isRunning() {
+        return !!(state.job && state.job.status === 'running');
+      }
+
+      $('btn-start').addEventListener('click', function () {
+        hide('error-box');
+        var t0 = performance.now();
+        fetch('/api/bse/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+          .then(function (res) {
+            var elapsed = Math.round(performance.now() - t0);
+            return res.json().then(function (body) {
+              show('ack-box', 'HTTP ' + res.status + ' ' + res.statusText + ' in ' + elapsed + ' ms | ' + body.message);
+              if (res.status !== 202) {
+                throw new Error(body.error || 'Unexpected response status ' + res.status);
+              }
+            });
+          })
+          .catch(function (err) {
+            show('error-box', 'Could not start pull: ' + err.message);
+          });
+      });
+
+      $('btn-cancel').addEventListener('click', function () {
+        if (!isRunning()) { return; }
+        state.cancelling = true;
+        scheduleRender();
+        fetch('/api/bse/pull/' + encodeURIComponent(state.job.id), { method: 'DELETE' })
+          .then(function (res) {
+            if (!res.ok) {
+              return res.json().then(function (body) { throw new Error(body.error || 'HTTP ' + res.status); });
+            }
+          })
+          .catch(function (err) {
+            state.cancelling = false;
+            show('error-box', 'Could not cancel pull: ' + err.message);
+            scheduleRender();
+          });
+      });
+
+      $('btn-clear').addEventListener('click', function () {
+        if (!window.confirm('Delete all stored trades?')) { return; }
+        fetch('/api/trades', { method: 'DELETE' })
+          .then(function (res) {
+            if (!res.ok) {
+              return res.json().then(function (body) { throw new Error(body.error || 'HTTP ' + res.status); });
+            }
+          })
+          .catch(function (err) {
+            show('error-box', 'Could not clear trades: ' + err.message);
+          });
+      });
+
+      // ---------------------------------------------------------------- Rendering
+
+      function scheduleRender() {
+        if (renderQueued) { return; }
+        renderQueued = true;
+        requestAnimationFrame(function () {
+          renderQueued = false;
+          render();
+        });
+      }
+
+      function render() {
+        renderConnection();
+        renderProgress();
+        renderStats();
+        renderSymbols();
+        renderGrid();
+        state.newCount = 0;
+      }
+
+      function renderConnection() {
+        var badge = $('conn-badge');
+        if (state.connected) {
+          badge.textContent = 'Live';
+          badge.className = 'px-3 py-1 rounded-full text-xs font-medium bg-emerald-900 text-emerald-300';
+        } else {
+          badge.textContent = 'Reconnecting...';
+          badge.className = 'px-3 py-1 rounded-full text-xs font-medium bg-red-900 text-red-300';
+        }
+        $('btn-start').disabled = !state.connected || isRunning();
+        $('btn-cancel').disabled = !state.connected || !isRunning() || state.cancelling;
+        $('btn-clear').disabled = !state.connected || isRunning();
+      }
+
+      function renderProgress() {
+        var job = state.job;
+        var statusEl = $('job-status');
+        if (!job) {
+          statusEl.textContent = 'idle';
+          statusEl.className = 'text-xs px-2 py-0.5 rounded bg-slate-700 text-slate-300';
+          $('progress-bar').style.width = '0%';
+          $('prog-trades').textContent = '0 / 0';
+          $('prog-chunks').textContent = '0 / 0';
+          $('prog-eta').textContent = '-';
+          $('prog-job').textContent = '-';
+          return;
+        }
+
+        var colors = {
+          running: 'bg-sky-900 text-sky-300',
+          completed: 'bg-emerald-900 text-emerald-300',
+          failed: 'bg-red-900 text-red-300',
+          cancelled: 'bg-amber-900 text-amber-300'
+        };
+        statusEl.textContent = job.status;
+        statusEl.className = 'text-xs px-2 py-0.5 rounded ' + (colors[job.status] || 'bg-slate-700 text-slate-300');
+
+        var pct = job.totalChunks ? Math.min(100, (job.chunksDelivered / job.totalChunks) * 100) : 0;
+        $('progress-bar').style.width = pct.toFixed(1) + '%';
+        $('prog-trades').textContent = nfInt.format(job.deliveredTrades) + ' / ' + nfInt.format(job.totalTrades);
+        $('prog-chunks').textContent = nfInt.format(job.chunksDelivered) + ' / ' + nfInt.format(job.totalChunks);
+        $('prog-job').textContent = job.id;
+
+        if (job.status === 'running') {
+          $('prog-eta').textContent = formatDuration((job.totalChunks - job.chunksDelivered) * job.chunkIntervalMs);
+        } else {
+          $('prog-eta').textContent = '-';
+        }
+      }
+
+      function renderStats() {
+        var s = state.stats;
+        if (!s) { return; }
+        $('stat-trades').textContent = nfInt.format(s.totalTrades);
+        $('stat-volume').textContent = nfInt.format(s.totalVolume);
+        $('stat-turnover').textContent = nfCompact.format(s.totalTurnover);
+        $('stat-sides').textContent = nfInt.format(s.buyCount) + ' / ' + nfInt.format(s.sellCount);
+      }
+
+      function renderSymbols() {
+        var s = state.stats;
+        var container = $('symbol-bars');
+        if (!s || !s.symbols.length) {
+          container.innerHTML = '';
+          $('symbol-empty').classList.remove('hidden');
+          return;
+        }
+        $('symbol-empty').classList.add('hidden');
+        var max = s.symbols[0].turnover || 1;
+        container.innerHTML = s.symbols.map(function (row) {
+          var width = Math.max(1, (row.turnover / max) * 100).toFixed(1);
+          return '<div>' +
+            '<div class="flex justify-between text-xs mb-1">' +
+              '<span class="text-slate-200 font-medium">' + esc(row.symbol) + ' <span class="text-slate-500 mono">' + esc(row.scripCode) + '</span></span>' +
+              '<span class="text-slate-400 mono">' + esc(nfCompact.format(row.turnover)) + ' | last ' + esc(nfMoney.format(row.last)) + '</span>' +
+            '</div>' +
+            '<div class="w-full h-2 rounded bg-slate-800 overflow-hidden"><div class="h-2 bg-sky-500" style="width:' + width + '%"></div></div>' +
+          '</div>';
+        }).join('');
+      }
+
+      function renderGrid() {
+        $('grid-max').textContent = MAX_ROWS;
+        var flashCount = state.newCount;
+        $('trade-rows').innerHTML = state.trades.map(function (t, index) {
+          var time = new Date(t.tradeTime).toLocaleTimeString('en-IN', { hour12: false });
+          var sideClass = t.side === 'BUY' ? 'text-emerald-400' : 'text-red-400';
+          var rowClass = index < flashCount ? 'flash ' : '';
+          return '<tr class="' + rowClass + 'border-t border-slate-800/60">' +
+            '<td class="px-3 py-1.5 text-slate-500">' + esc(t.seq) + '</td>' +
+            '<td class="px-3 py-1.5">' + esc(time) + '</td>' +
+            '<td class="px-3 py-1.5 text-slate-400">' + esc(t.scripCode) + '</td>' +
+            '<td class="px-3 py-1.5 text-white">' + esc(t.symbol) + '</td>' +
+            '<td class="px-3 py-1.5 ' + sideClass + '">' + esc(t.side) + '</td>' +
+            '<td class="px-3 py-1.5 text-right">' + esc(nfMoney.format(t.price)) + '</td>' +
+            '<td class="px-3 py-1.5 text-right">' + esc(nfInt.format(t.quantity)) + '</td>' +
+            '<td class="px-3 py-1.5 text-right">' + esc(nfMoney.format(t.value)) + '</td>' +
+          '</tr>';
+        }).join('');
+      }
+
+      render();
+      connect();
+    })();
+  </script>
+</body>
+</html>
